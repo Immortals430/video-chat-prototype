@@ -1,43 +1,51 @@
-import express from "express";
-import { Server } from "socket.io";
-import http from "http";
+require("dotenv").config()
+const express = require('express');
+const http = require('http');
+const { Server } = require('socket.io');
 const app = express();
+const PORT = process.env.PORT || 5000
+const origin = process.env.ORIGIN || "*"
 const server = http.createServer(app);
-
-
 const io = new Server(server, {
-    cors: {
-      origin: "*",
-      methods: ["GET", "POST"],
-    },
+  cors: {
+    origin,
+  },
+});
+console.log(origin)
+const users = {
+  // userId: socketId
+}
+
+io.on('connection', (socket) => {
+  
+  socket.on("connected", ({ myUserId }) => {
+    users[myUserId] = socket.id
+    console.log(users)
+  })
+
+  socket.on("offer", ({ callerId, userToCallId, offer }) =>{
+    io.to(users[userToCallId]).emit("offer", { callerId, offer })
+  })
+  
+  socket.on("answer", ({ callerId, answer }) =>{
+    io.to(users[callerId]).emit("answer", { answer })
+  })
+
+  socket.on("icecandidate", ({ outGoingUCallserId, candidate }) => {
+    io.to(users[outGoingUCallserId]).emit("icecandidate", { candidate })
+  })
+
+  socket.on('disconnect', () => {
+    Object.keys(users).forEach((userId) => {
+      if (users[userId] === socket.id) {
+        delete users[userId];
+      }
+    });
+    
+    console.log('User disconnected:', socket.id);
   });
+});
 
-  const users = {
-    // userid: socketid
-  }
-
-io.on("connection", (socket) => {
-    socket.on("connected", (data) => {
-        users[data.id] = socket.id
-        console.log(users)
-    })
-
-    socket.on("offer", offer => {
-      socket.broadcast.emit("offer", offer)
-    })
-
-    socket.on("answer", answer => {
-      socket.broadcast.emit("answer", answer)
-    })
-
-    socket.on("disconnect", () => {
-      Object.keys(users).forEach(key => {
-        if(users[key] == socket.id){
-          delete users[key]
-        }
-      })
-      console.log("user disconnected", users)
-    })
-})
-
-server.listen(3000, () => console.log("connected to socket"))
+server.listen(PORT, () => {
+  console.log('Signaling server running on port 5000');
+});

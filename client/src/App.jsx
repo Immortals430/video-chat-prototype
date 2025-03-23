@@ -1,99 +1,146 @@
-import { useEffect, useRef, useState } from "react";
-import { socket } from "./config/socket";
+import React, { useEffect, useRef, useState } from "react";
+import io from "socket.io-client";
+const url = import.meta.env.VITE_SOCKET_SERVER_URL || "http://localhost:5000";
+const socket = io(url);
 
-
-function App() {
-  const localVideoRef = useRef(null);
-  const peer = useRef(null);
+export default function App() {
   const localStream = useRef(null);
   const remoteStream = useRef(null);
+  const [myUserId, setMyUserId] = useState();
+  const [outGoingUCallserId, setOutGoingUCallserId] = useState();
+  const peerReference = useRef(null);
+  const [incomingCallState, setIncomingCallState] = useState(false);
+  const [callerId, setCallerId] = useState();
+  const [incomingOffer, setIncomingOffer] = useState();
 
-
+  // stream local video
   const streamLocalVideo = async () => {
-    localStream.current = await navigator.mediaDevices.getUserMedia({
+    const video = await navigator.mediaDevices.getUserMedia({
       video: true,
-      audio: true
     });
-    localVideoRef.current.srcObject = localStream.current
+    localStream.current.srcObject = video;
+    return video;
   };
 
+  // add track
+  const addTrack = async (video, peer) => {
+    video.getTracks().forEach((track) => {
+      peer.addTrack(track, video);
+    });
+  };
+
+  // create peer
   const createPeer = () => {
-    peer.current = new RTCPeerConnection({
+    const peer = new RTCPeerConnection({
       iceServers: [{ urls: "stun:stun.l.google.com:19302" }],
     });
+    peerReference.current = peer;
+    return peer;
   };
 
-  // start video call
-
-  const startVideoCall = async () => {
-    const offer = await createOffer();
-    socket.emit("offer", offer);
-  };
-
-  const createOffer = async () => {
-    const offer = await peer.current.createOffer();
-    await peer.current.setLocalDescription(offer);
+  // createOffer
+  const createOffer = async (peer) => {
+    const offer = await peer.createOffer();
+    await peer.setLocalDescription(offer);
     return offer;
   };
 
-  const createAnswer = async (offer) => {
-    await peer.current.setRemoteDescription(offer);
-    const answer = await peer.current.createAnswer();
-    await peer.current.setLocalDescription(answer);
-    socket.emit("answer", answer);
+  // createAnswer
+  const createAnswer = async (peer, offer) => {
+    await peer.setRemoteDescription(offer);
+    const answer = await peer.createAnswer();
+    await peer.setLocalDescription(answer);
+    return answer;
   };
 
-  const setRemoteAns = async (ans) => {
-    await peer.current.setRemoteDescription(ans);
+  // handle incoming answer
+  const handleIncomingAnswer = async (answer) => {
+    await peerReference.current.setRemoteDescription(answer);
   };
 
-  const sendStream = () => {
-    const tracks = localStream.current.getTracks();
-    for (const track of tracks) { 
-      peer.current.addTrack(track, localStream.current);
+  // handle incoming track
+  const handleTrack = async (e) => {
+    remoteStream.current.srcObject = e.streams[0];
+  };
+
+  // emit ice candidate
+  const emitIceCandidate = (e, outGoingUCallserId) => {
+    if (e.candidate) {
+      socket.emit("icecandidate", {
+        outGoingUCallserId,
+        candidate: e.candidate,
+      });
     }
   };
 
-  const handleRemoteStream = (e) => {
-    const stream = e.streams;
-    remoteStream.current.srcObject = stream[0];
+  // add ice candidate
+  const handleIceCandidate = async (candidate) => {
+    if (peerReference.current) {
+      await peerReference.current.addIceCandidate(candidate);
+    }
   };
 
   useEffect(() => {
-    const stream = async () => {
-      await streamLocalVideo();
-      await createPeer();
-      const id = window.prompt("enter userId");
-      socket.emit("connected", { name: "Vishal", id });
-      sendStream()
+    const myUserId = prompt();
+    setMyUserId(myUserId);
+    socket.emit("connected", { myUserId });
+
+    socket.on("offer", ({ callerId, offer }) => {
+      setIncomingCallState(true);
+      setIncomingOffer(offer);
+      setCallerId(callerId);
+    });
 
 
-      socket.on("offer", createAnswer);
-      socket.on("answer",setRemoteAns);
-  
-  
-      peer.current.addEventListener("track", handleRemoteStream);
-      peer.current.addEventListener("negotiationneeded", startVideoCall);
-    }
-    stream()
-
+    socket.on("answer", ({ answer }) => handleIncomingAnswer(answer));
+    socket.on("icecandidate", ({ candidate }) => handleIceCandidate(candidate));
 
     return () => {
-      socket.off("connected");
-      socket.off("answer");
       socket.off("offer");
-      peer.current.removeEventListener("track", handleRemoteStream);
-      peer.current.removeEventListener("negotiationneeded", startVideoCall)
+      socket.off("answer");
+      socket.off("icecandidate")
     };
   }, []);
 
+  const callUser = async (myUserId, outGoingUCallserId) => {
+    const video = await streamLocalVideo();
+    const peer = createPeer();
+    peer.ontrack = handleTrack
+    peer.onicecandidate = (e) => emitIceCandidate(e, outGoingUCallserId);
+    await addTrack(video, peer);
+    const offer = await createOffer(peer);
+    socket.emit("offer", {
+      callerId: myUserId,
+      userToCallId: outGoingUCallserId,
+      offer,
+    });
+  };
+
+  const answerCall = async (callerId) => {
+    setIncomingCallState(false);
+    const video = await streamLocalVideo();
+    const peer = createPeer();
+    peer.ontrack = handleTrack
+    peer.onicecandidate = (e) => emitIceCandidate(e, callerId);
+    await addTrack(video, peer);
+    const answer = await createAnswer(peer, incomingOffer);
+    socket.emit("answer", { callerId, answer });
+  };
+
   return (
     <>
-      <video ref={localVideoRef} autoPlay width={"500px"}></video>
-      <video ref={remoteStream} autoPlay playsInline width={"500px"}></video>
-      <button onClick={() => startVideoCall()}>Connect</button>
+      <video autoPlay ref={localStream}></video>
+      <video autoPlay ref={remoteStream}></video>
+      <input
+        type="text"
+        onChange={(e) => setOutGoingUCallserId(e.target.value)}
+      />
+      <button onClick={() => callUser(myUserId, outGoingUCallserId)}>
+        Call
+      </button>
+      {incomingCallState && (
+        <button onClick={() => answerCall(callerId)}>Incoming Call</button>
+      )}
     </>
   );
 }
-
-export default App;
